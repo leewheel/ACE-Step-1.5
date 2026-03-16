@@ -94,6 +94,82 @@ class GenerationHandlersTests(unittest.TestCase):
         understand_music_mock.assert_called_once()
         warning_mock.assert_not_called()
 
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.gr.Warning")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.understand_music")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions._transcribe_lyrics_with_whisper")
+    def test_analyze_src_audio_clears_unreliable_zh_pinyin_lyrics(
+        self,
+        whisper_fallback_mock,
+        understand_music_mock,
+        warning_mock,
+    ):
+        """Clear analyzed lyrics when Chinese output looks like numbered pinyin placeholders."""
+        dit_handler = _FakeDitHandler("<|audio_code_123|><|audio_code_456|>")
+        llm_handler = SimpleNamespace(llm_initialized=True)
+        whisper_fallback_mock.return_value = ("", "")
+        understand_music_mock.return_value = SimpleNamespace(
+            success=True,
+            status_message="ok",
+            caption="caption",
+            lyrics="[zh] kan4 na4 ge5 ying2 chun1 tian1\n[zh] ni3 jiu4 zai4 tai2 bei3",
+            bpm=120,
+            duration=30.0,
+            keyscale="C major",
+            language="zh",
+            timesignature="4",
+        )
+
+        result = generation_handlers.analyze_src_audio(
+            dit_handler=dit_handler,
+            llm_handler=llm_handler,
+            src_audio="real.mp3",
+            constrained_decoding_debug=False,
+        )
+
+        self.assertEqual(result[3], "")
+        self.assertIn("拼音占位歌词", result[1])
+        understand_music_mock.assert_called_once()
+        whisper_fallback_mock.assert_called_once()
+        warning_mock.assert_not_called()
+
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.gr.Warning")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.understand_music")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions._transcribe_lyrics_with_whisper")
+    def test_analyze_src_audio_uses_whisper_fallback_for_unreliable_zh_lyrics(
+        self,
+        whisper_fallback_mock,
+        understand_music_mock,
+        warning_mock,
+    ):
+        """Use Whisper transcript when analyzed Chinese lyrics look unreliable."""
+        dit_handler = _FakeDitHandler("<|audio_code_123|><|audio_code_456|>")
+        llm_handler = SimpleNamespace(llm_initialized=True)
+        whisper_fallback_mock.return_value = ("日出嵩山坳\n晨钟惊飞鸟", "✅ 已使用Whisper回退转写歌词。")
+        understand_music_mock.return_value = SimpleNamespace(
+            success=True,
+            status_message="ok",
+            caption="caption",
+            lyrics="[zh] kan4 na4 ge5 ying2 chun1 tian1\n[zh] ni3 jiu4 zai4 tai2 bei3",
+            bpm=120,
+            duration=30.0,
+            keyscale="C major",
+            language="zh",
+            timesignature="4",
+        )
+
+        result = generation_handlers.analyze_src_audio(
+            dit_handler=dit_handler,
+            llm_handler=llm_handler,
+            src_audio="real.mp3",
+            constrained_decoding_debug=False,
+        )
+
+        self.assertEqual(result[3], "日出嵩山坳\n晨钟惊飞鸟")
+        self.assertIn("Whisper回退转写歌词", result[1])
+        understand_music_mock.assert_called_once()
+        whisper_fallback_mock.assert_called_once()
+        warning_mock.assert_not_called()
+
     @patch("acestep.ui.gradio.events.generation.service_init.get_global_gpu_config")
     @patch("acestep.ui.gradio.events.generation.service_init.get_model_type_ui_settings")
     def test_init_service_wrapper_preserves_batch_size(

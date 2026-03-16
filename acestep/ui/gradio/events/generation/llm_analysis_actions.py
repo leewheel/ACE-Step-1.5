@@ -4,12 +4,79 @@ This module contains source-audio analysis and audio-code transcription
 entry points used by the Gradio generation UI.
 """
 
+import re
+import os
+
 import gradio as gr
 
 from acestep.inference import understand_music
 from acestep.ui.gradio.i18n import t
 
 from .validation import _contains_audio_code_tokens, clamp_duration_to_gpu_limit
+
+
+def _is_unreliable_zh_lyrics(language: str, lyrics: str) -> bool:
+    """Return True when analyzed Chinese lyrics look like synthetic numbered pinyin."""
+    if not lyrics or not language:
+        return False
+    if language.strip().lower() not in {"zh", "yue"}:
+        return False
+
+    lowered = lyrics.lower()
+    numbered_tokens = re.findall(r"\b[a-züv]+[1-5]\b", lowered)
+    if len(numbered_tokens) < 6:
+        return False
+    return "[zh]" in lowered or len(numbered_tokens) >= 10
+
+
+def _sanitize_analysis_lyrics(language: str, lyrics: str, status_message: str) -> tuple[str, str]:
+    """Clear unreliable analyzed lyrics and append a warning message to status."""
+    if not _is_unreliable_zh_lyrics(language=language, lyrics=lyrics):
+        return lyrics, status_message
+
+    warning = "⚠ 检测到疑似拼音占位歌词，已清空歌词，请手动填写或改用转写流程。"
+    if status_message:
+        return "", f"{status_message}\n{warning}"
+    return "", warning
+
+
+def _transcribe_lyrics_with_whisper(src_audio: str, language: str) -> tuple[str, str]:
+    """Transcribe lyrics from source audio via Whisper API when fallback is available."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return "", "ℹ 未启用Whisper歌词回退（缺少 OPENAI_API_KEY）。"
+
+    try:
+        from scripts.lora_data_prepare.whisper_transcription import (
+            transcribe_whisper,
+            words_to_lyrics,
+        )
+    except Exception:
+        return "", "ℹ Whisper歌词回退不可用（缺少转写依赖）。"
+
+    target_language = (language or "").strip().lower()
+    if target_language == "yue":
+        target_language = "zh"
+    if not target_language:
+        target_language = None
+
+    api_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").strip()
+    model = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1").strip()
+    try:
+        words = transcribe_whisper(
+            audio_path=src_audio,
+            api_key=api_key,
+            api_url=api_url,
+            model=model,
+            language=target_language,
+        )
+        lyrics = words_to_lyrics(words).strip()
+    except Exception as exc:
+        return "", f"ℹ Whisper歌词回退失败：{exc}"
+
+    if not lyrics:
+        return "", "ℹ Whisper歌词回退未返回有效文本。"
+    return lyrics, "✅ 已使用Whisper回退转写歌词。"
 
 
 def analyze_src_audio(
@@ -96,12 +163,28 @@ def analyze_src_audio(
             False,
         )
 
+    sanitized_lyrics, sanitized_status = _sanitize_analysis_lyrics(
+        language=result.language,
+        lyrics=result.lyrics,
+        status_message=result.status_message,
+    )
+    if _is_unreliable_zh_lyrics(language=result.language, lyrics=result.lyrics):
+        fallback_lyrics, fallback_status = _transcribe_lyrics_with_whisper(
+            src_audio=src_audio,
+            language=result.language,
+        )
+        if fallback_lyrics:
+            sanitized_lyrics = fallback_lyrics
+        if fallback_status:
+            sanitized_status = (
+                f"{sanitized_status}\n{fallback_status}" if sanitized_status else fallback_status
+            )
     clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
     return (
         codes_string,
-        result.status_message,
+        sanitized_status,
         result.caption,
-        result.lyrics,
+        sanitized_lyrics,
         result.bpm,
         clamped_duration,
         result.keyscale,
@@ -135,11 +218,16 @@ def transcribe_audio_codes(llm_handler, audio_code_string, constrained_decoding_
             return t("messages.lm_not_initialized"), "", "", None, None, "", "", "", False
         return result.status_message, "", "", None, None, "", "", "", False
 
+    sanitized_lyrics, sanitized_status = _sanitize_analysis_lyrics(
+        language=result.language,
+        lyrics=result.lyrics,
+        status_message=result.status_message,
+    )
     clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
     return (
-        result.status_message,
+        sanitized_status,
         result.caption,
-        result.lyrics,
+        sanitized_lyrics,
         result.bpm,
         clamped_duration,
         result.keyscale,
