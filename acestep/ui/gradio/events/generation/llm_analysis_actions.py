@@ -30,53 +30,113 @@ def _is_unreliable_zh_lyrics(language: str, lyrics: str) -> bool:
 
 
 def _sanitize_analysis_lyrics(language: str, lyrics: str, status_message: str) -> tuple[str, str]:
-    """Clear unreliable analyzed lyrics and append a warning message to status."""
+    """Keep lyrics text and append a warning when Chinese lyrics look unreliable."""
     if not _is_unreliable_zh_lyrics(language=language, lyrics=lyrics):
         return lyrics, status_message
 
-    warning = "⚠ 检测到疑似拼音占位歌词，已清空歌词，请手动填写或改用转写流程。"
+    warning = "⚠ 检测到疑似拼音占位歌词，当前结果可能不准确。"
     if status_message:
-        return "", f"{status_message}\n{warning}"
-    return "", warning
+        return lyrics, f"{status_message}\n{warning}"
+    return lyrics, warning
+
+
+def _should_prioritize_whisper_lyrics(language: str) -> bool:
+    """Return True when lyrics should prefer Whisper transcription over LM output."""
+    if not language:
+        return False
+    return language.strip().lower() in {"zh", "yue"}
 
 
 def _transcribe_lyrics_with_whisper(src_audio: str, language: str) -> tuple[str, str]:
     """Transcribe lyrics from source audio via Whisper API when fallback is available."""
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return "", "ℹ 未启用Whisper歌词回退（缺少 OPENAI_API_KEY）。"
-
-    try:
-        from scripts.lora_data_prepare.whisper_transcription import (
-            transcribe_whisper,
-            words_to_lyrics,
-        )
-    except Exception:
-        return "", "ℹ Whisper歌词回退不可用（缺少转写依赖）。"
-
     target_language = (language or "").strip().lower()
     if target_language == "yue":
         target_language = "zh"
     if not target_language:
         target_language = None
 
-    api_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").strip()
-    model = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1").strip()
-    try:
-        words = transcribe_whisper(
-            audio_path=src_audio,
-            api_key=api_key,
-            api_url=api_url,
-            model=model,
-            language=target_language,
-        )
-        lyrics = words_to_lyrics(words).strip()
-    except Exception as exc:
-        return "", f"ℹ Whisper歌词回退失败：{exc}"
+    if api_key:
+        try:
+            from scripts.lora_data_prepare.whisper_transcription import (
+                transcribe_whisper,
+                words_to_lyrics,
+            )
+        except Exception:
+            pass
+        else:
+            api_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").strip()
+            model = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1").strip()
+            try:
+                words = transcribe_whisper(
+                    audio_path=src_audio,
+                    api_key=api_key,
+                    api_url=api_url,
+                    model=model,
+                    language=target_language,
+                )
+                lyrics = words_to_lyrics(words).strip()
+            except Exception:
+                lyrics = ""
+            if lyrics:
+                return lyrics, "✅ 已使用Whisper回退转写歌词。"
 
+    local_lyrics, local_status = _transcribe_lyrics_with_local_whisper(
+        src_audio=src_audio,
+        language=target_language or "",
+    )
+    if local_lyrics:
+        return local_lyrics, local_status
+    if api_key:
+        return "", f"ℹ Whisper歌词回退失败，且本地回退不可用：{local_status}"
+    return "", f"ℹ 未配置 OPENAI_API_KEY，且本地回退不可用：{local_status}"
+
+
+def _transcribe_lyrics_with_local_whisper(src_audio: str, language: str) -> tuple[str, str]:
+    """Transcribe lyrics via local Whisper model using transformers pipeline."""
+    try:
+        import torch
+        from transformers import pipeline
+    except Exception:
+        return "", "缺少本地转写依赖（torch/transformers）。"
+
+    model_id = os.getenv("LOCAL_WHISPER_MODEL", "openai/whisper-small").strip()
+    device = 0 if torch.cuda.is_available() else -1
+    torch_dtype = torch.float16 if device >= 0 else torch.float32
+
+    cached_model_id = getattr(_transcribe_lyrics_with_local_whisper, "_model_id", None)
+    cached_device = getattr(_transcribe_lyrics_with_local_whisper, "_device", None)
+    asr_pipeline = getattr(_transcribe_lyrics_with_local_whisper, "_pipeline", None)
+    if asr_pipeline is None or cached_model_id != model_id or cached_device != device:
+        try:
+            asr_pipeline = pipeline(
+                "automatic-speech-recognition",
+                model=model_id,
+                chunk_length_s=30,
+                device=device,
+                torch_dtype=torch_dtype,
+            )
+        except Exception as exc:
+            return "", f"本地Whisper初始化失败：{exc}"
+        _transcribe_lyrics_with_local_whisper._pipeline = asr_pipeline
+        _transcribe_lyrics_with_local_whisper._model_id = model_id
+        _transcribe_lyrics_with_local_whisper._device = device
+
+    generate_kwargs = {}
+    if language:
+        generate_kwargs["language"] = language
+    try:
+        if generate_kwargs:
+            result = asr_pipeline(src_audio, generate_kwargs=generate_kwargs)
+        else:
+            result = asr_pipeline(src_audio)
+    except Exception as exc:
+        return "", f"本地Whisper转写失败：{exc}"
+
+    lyrics = (result.get("text", "") if isinstance(result, dict) else "").strip()
     if not lyrics:
-        return "", "ℹ Whisper歌词回退未返回有效文本。"
-    return lyrics, "✅ 已使用Whisper回退转写歌词。"
+        return "", "本地Whisper未返回有效文本。"
+    return lyrics, f"✅ 已使用本地Whisper回退转写歌词（{model_id}）。"
 
 
 def analyze_src_audio(
@@ -168,13 +228,17 @@ def analyze_src_audio(
         lyrics=result.lyrics,
         status_message=result.status_message,
     )
-    if _is_unreliable_zh_lyrics(language=result.language, lyrics=result.lyrics):
+    if _should_prioritize_whisper_lyrics(language=result.language):
         fallback_lyrics, fallback_status = _transcribe_lyrics_with_whisper(
             src_audio=src_audio,
             language=result.language,
         )
         if fallback_lyrics:
             sanitized_lyrics = fallback_lyrics
+            sanitized_status = sanitized_status.replace(
+                "⚠ 检测到疑似拼音占位歌词，当前结果可能不准确。",
+                "",
+            ).strip()
         if fallback_status:
             sanitized_status = (
                 f"{sanitized_status}\n{fallback_status}" if sanitized_status else fallback_status

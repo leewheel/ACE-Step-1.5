@@ -397,11 +397,11 @@ ACESTEP_ARGS="acestep --port $PORT --server-name $SERVER_NAME --language $LANGUA
 [[ -n "$AUTH_USERNAME" ]] && ACESTEP_ARGS="$ACESTEP_ARGS $AUTH_USERNAME"
 [[ -n "$AUTH_PASSWORD" ]] && ACESTEP_ARGS="$ACESTEP_ARGS $AUTH_PASSWORD"
 
-cd "$SCRIPT_DIR" && uv run $ACESTEP_ARGS || {
+cd "$SCRIPT_DIR" && uv run --no-sync $ACESTEP_ARGS || {
     echo
     echo "[Retry] Online dependency resolution failed, retrying in offline mode..."
     echo
-    uv run --offline $ACESTEP_ARGS || {
+    uv run --offline --no-sync $ACESTEP_ARGS || {
         echo
         echo "========================================"
         echo "[Error] Failed to start ACE-Step"

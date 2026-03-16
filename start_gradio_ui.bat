@@ -317,12 +317,12 @@ if exist "%~dp0python_embedded\python.exe" (
     if not "%AUTH_USERNAME%"=="" set "ACESTEP_ARGS=!ACESTEP_ARGS! %AUTH_USERNAME%"
     if not "%AUTH_PASSWORD%"=="" set "ACESTEP_ARGS=!ACESTEP_ARGS! %AUTH_PASSWORD%"
 
-    uv run !ACESTEP_ARGS!
+    uv run --no-sync !ACESTEP_ARGS!
     if !ERRORLEVEL! NEQ 0 (
         echo.
         echo [Retry] Online dependency resolution failed, retrying in offline mode...
         echo.
-        uv run --offline !ACESTEP_ARGS!
+        uv run --offline --no-sync !ACESTEP_ARGS!
         if !ERRORLEVEL! NEQ 0 (
             echo.
             echo ========================================

@@ -283,11 +283,11 @@ ACESTEP_ARGS=(acestep-api --host "$HOST" --port "$PORT")
 [[ -n "$DOWNLOAD_SOURCE" ]] && ACESTEP_ARGS+=(--download-source "$DOWNLOAD_SOURCE")
 [[ -n "$LM_MODEL_PATH" ]] && ACESTEP_ARGS+=(--lm-model-path "$LM_MODEL_PATH")
 
-cd "$SCRIPT_DIR" && uv run "${ACESTEP_ARGS[@]}" || {
+cd "$SCRIPT_DIR" && uv run --no-sync "${ACESTEP_ARGS[@]}" || {
     echo
     echo "[Retry] Online dependency resolution failed, retrying in offline mode..."
     echo
-    uv run --offline "${ACESTEP_ARGS[@]}" || {
+    uv run --offline --no-sync "${ACESTEP_ARGS[@]}" || {
         echo
         echo "========================================"
         echo "[Error] Failed to start ACE-Step API Server"

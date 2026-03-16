@@ -97,13 +97,13 @@ class GenerationHandlersTests(unittest.TestCase):
     @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.gr.Warning")
     @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.understand_music")
     @patch("acestep.ui.gradio.events.generation.llm_analysis_actions._transcribe_lyrics_with_whisper")
-    def test_analyze_src_audio_clears_unreliable_zh_pinyin_lyrics(
+    def test_analyze_src_audio_keeps_unreliable_zh_lyrics_when_fallback_unavailable(
         self,
         whisper_fallback_mock,
         understand_music_mock,
         warning_mock,
     ):
-        """Clear analyzed lyrics when Chinese output looks like numbered pinyin placeholders."""
+        """Keep analyzed lyrics when fallback is unavailable, but mark low confidence."""
         dit_handler = _FakeDitHandler("<|audio_code_123|><|audio_code_456|>")
         llm_handler = SimpleNamespace(llm_initialized=True)
         whisper_fallback_mock.return_value = ("", "")
@@ -126,7 +126,7 @@ class GenerationHandlersTests(unittest.TestCase):
             constrained_decoding_debug=False,
         )
 
-        self.assertEqual(result[3], "")
+        self.assertIn("[zh] kan4", result[3])
         self.assertIn("拼音占位歌词", result[1])
         understand_music_mock.assert_called_once()
         whisper_fallback_mock.assert_called_once()
@@ -150,6 +150,44 @@ class GenerationHandlersTests(unittest.TestCase):
             status_message="ok",
             caption="caption",
             lyrics="[zh] kan4 na4 ge5 ying2 chun1 tian1\n[zh] ni3 jiu4 zai4 tai2 bei3",
+            bpm=120,
+            duration=30.0,
+            keyscale="C major",
+            language="zh",
+            timesignature="4",
+        )
+
+        result = generation_handlers.analyze_src_audio(
+            dit_handler=dit_handler,
+            llm_handler=llm_handler,
+            src_audio="real.mp3",
+            constrained_decoding_debug=False,
+        )
+
+        self.assertEqual(result[3], "日出嵩山坳\n晨钟惊飞鸟")
+        self.assertIn("Whisper回退转写歌词", result[1])
+        understand_music_mock.assert_called_once()
+        whisper_fallback_mock.assert_called_once()
+        warning_mock.assert_not_called()
+
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.gr.Warning")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions.understand_music")
+    @patch("acestep.ui.gradio.events.generation.llm_analysis_actions._transcribe_lyrics_with_whisper")
+    def test_analyze_src_audio_prioritizes_whisper_for_zh_lyrics_even_if_not_pinyin(
+        self,
+        whisper_fallback_mock,
+        understand_music_mock,
+        warning_mock,
+    ):
+        """Prefer Whisper transcript for zh lyrics even when LM text is not pinyin-like."""
+        dit_handler = _FakeDitHandler("<|audio_code_123|><|audio_code_456|>")
+        llm_handler = SimpleNamespace(llm_initialized=True)
+        whisper_fallback_mock.return_value = ("日出嵩山坳\n晨钟惊飞鸟", "✅ 已使用Whisper回退转写歌词。")
+        understand_music_mock.return_value = SimpleNamespace(
+            success=True,
+            status_message="ok",
+            caption="caption",
+            lyrics="人在山野\n人在雪原",
             bpm=120,
             duration=30.0,
             keyscale="C major",
